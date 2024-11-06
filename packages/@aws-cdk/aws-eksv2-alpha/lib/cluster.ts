@@ -7,7 +7,6 @@ import { IAccessPolicy, IAccessEntry, AccessEntry, AccessPolicy, AccessScopeType
 import { IAddon, Addon } from './addon';
 import { AlbController, AlbControllerOptions } from './alb-controller';
 import { AwsAuth } from './aws-auth';
-import { clusterArnComponents } from './cluster-resource';
 import { FargateProfile, FargateProfileOptions } from './fargate-profile';
 import { HelmChart, HelmChartOptions } from './helm-chart';
 import { INSTANCE_TYPES } from './instance-types';
@@ -26,7 +25,7 @@ import * as iam from 'aws-cdk-lib/aws-iam';
 import * as kms from 'aws-cdk-lib/aws-kms';
 import * as lambda from 'aws-cdk-lib/aws-lambda';
 import * as ssm from 'aws-cdk-lib/aws-ssm';
-import { Annotations, CfnOutput, CfnResource, IResource, Resource, Stack, Tags, Token, Duration, Size } from 'aws-cdk-lib/core';
+import { Annotations, CfnOutput, CfnResource, IResource, Resource, Stack, Tags, Token, Duration, Size, ArnComponents } from 'aws-cdk-lib/core';
 import { CfnCluster } from 'aws-cdk-lib/aws-eks';
 
 // defaults are based on https://eksctl.io
@@ -174,17 +173,6 @@ export interface ICluster extends IResource, ec2.IConnectable {
    * Amount of memory to allocate to the provider's lambda function.
    */
   readonly kubectlMemory?: Size;
-
-  /**
-   * A security group to associate with the Cluster Handler's Lambdas.
-   * The Cluster Handler's Lambdas are responsible for calling AWS's EKS API.
-   *
-   * Requires `placeClusterHandlerInVpc` to be set to true.
-   *
-   * @default - No security group.
-   * @attribute
-   */
-  readonly clusterHandlerSecurityGroup?: ec2.ISecurityGroup;
 
   /**
    * An AWS Lambda layer that includes the NPM dependency `proxy-agent`.
@@ -419,14 +407,6 @@ export interface ClusterAttributes {
   readonly kubectlMemory?: Size;
 
   /**
-   * A security group id to associate with the Cluster Handler's Lambdas.
-   * The Cluster Handler's Lambdas are responsible for calling AWS's EKS API.
-   *
-   * @default - No security group.
-   */
-  readonly clusterHandlerSecurityGroupId?: string;
-
-  /**
    * An AWS Lambda Layer which includes the NPM dependency `proxy-agent`. This layer
    * is used by the onEvent handler to route AWS SDK requests through a proxy.
    *
@@ -603,23 +583,6 @@ export interface ClusterOptions extends CommonClusterOptions {
   readonly kubectlMemory?: Size;
 
   /**
-   * Custom environment variables when interacting with the EKS endpoint to manage the cluster lifecycle.
-   *
-   * @default - No environment variables.
-   */
-  readonly clusterHandlerEnvironment?: { [key: string]: string };
-
-  /**
-   * A security group to associate with the Cluster Handler's Lambdas.
-   * The Cluster Handler's Lambdas are responsible for calling AWS's EKS API.
-   *
-   * Requires `placeClusterHandlerInVpc` to be set to true.
-   *
-   * @default - No security group.
-   */
-  readonly clusterHandlerSecurityGroup?: ec2.ISecurityGroup;
-
-  /**
    * An AWS Lambda Layer which includes the NPM dependency `proxy-agent`. This layer
    * is used by the onEvent handler to route AWS SDK requests through a proxy.
    *
@@ -649,14 +612,6 @@ export interface ClusterOptions extends CommonClusterOptions {
    * @default true
    */
   readonly prune?: boolean;
-
-  /**
-   * If set to true, the cluster handler functions will be placed in the private subnets
-   * of the cluster vpc, subject to the `vpcSubnets` selection strategy.
-   *
-   * @default false
-   */
-  readonly placeClusterHandlerInVpc?: boolean;
 
   /**
    * KMS secret for envelope encryption for Kubernetes secrets.
@@ -862,74 +817,6 @@ export interface ClusterProps extends ClusterOptions {
  */
 export class KubernetesVersion {
   /**
-   * Kubernetes version 1.14
-   * @deprecated Use newer version of EKS
-   */
-  public static readonly V1_14 = KubernetesVersion.of('1.14');
-
-  /**
-   * Kubernetes version 1.15
-   * @deprecated Use newer version of EKS
-   */
-  public static readonly V1_15 = KubernetesVersion.of('1.15');
-
-  /**
-   * Kubernetes version 1.16
-   * @deprecated Use newer version of EKS
-   */
-  public static readonly V1_16 = KubernetesVersion.of('1.16');
-
-  /**
-   * Kubernetes version 1.17
-   * @deprecated Use newer version of EKS
-   */
-  public static readonly V1_17 = KubernetesVersion.of('1.17');
-
-  /**
-   * Kubernetes version 1.18
-   * @deprecated Use newer version of EKS
-   */
-  public static readonly V1_18 = KubernetesVersion.of('1.18');
-
-  /**
-   * Kubernetes version 1.19
-   * @deprecated Use newer version of EKS
-   */
-  public static readonly V1_19 = KubernetesVersion.of('1.19');
-
-  /**
-   * Kubernetes version 1.20
-   * @deprecated Use newer version of EKS
-   */
-  public static readonly V1_20 = KubernetesVersion.of('1.20');
-
-  /**
-   * Kubernetes version 1.21
-   * @deprecated Use newer version of EKS
-   */
-  public static readonly V1_21 = KubernetesVersion.of('1.21');
-
-  /**
-   * Kubernetes version 1.22
-   * @deprecated Use newer version of EKS
-   *
-   * When creating a `Cluster` with this version, you need to also specify the
-   * `kubectlLayer` property with a `KubectlV22Layer` from
-   * `@aws-cdk/lambda-layer-kubectl-v22`.
-   * @deprecated Use newer version of EKS
-   */
-  public static readonly V1_22 = KubernetesVersion.of('1.22');
-
-  /**
-   * Kubernetes version 1.23
-   *
-   * When creating a `Cluster` with this version, you need to also specify the
-   * `kubectlLayer` property with a `KubectlV23Layer` from
-   * `@aws-cdk/lambda-layer-kubectl-v23`.
-   */
-  public static readonly V1_23 = KubernetesVersion.of('1.23');
-
-  /**
    * Kubernetes version 1.24
    *
    * When creating a `Cluster` with this version, you need to also specify the
@@ -1089,7 +976,6 @@ abstract class ClusterBase extends Resource implements ICluster {
   public abstract readonly kubectlSecurityGroup?: ec2.ISecurityGroup;
   public abstract readonly kubectlPrivateSubnets?: ec2.ISubnet[];
   public abstract readonly kubectlMemory?: Size;
-  public abstract readonly clusterHandlerSecurityGroup?: ec2.ISecurityGroup;
   public abstract readonly prune: boolean;
   public abstract readonly openIdConnectProvider: iam.IOpenIdConnectProvider;
   public abstract readonly awsAuth: AwsAuth;
@@ -1488,16 +1374,6 @@ export class Cluster extends ClusterBase {
   public readonly kubectlMemory?: Size;
 
   /**
-   * A security group to associate with the Cluster Handler's Lambdas.
-   * The Cluster Handler's Lambdas are responsible for calling AWS's EKS API.
-   *
-   * Requires `placeClusterHandlerInVpc` to be set to true.
-   *
-   * @default - No security group.
-   */
-  public readonly clusterHandlerSecurityGroup?: ec2.ISecurityGroup;
-
-  /**
    * The AWS Lambda layer that contains the NPM dependency `proxy-agent`. If
    * undefined, a SAR app that contains this layer will be used.
    */
@@ -1633,7 +1509,6 @@ export class Cluster extends ClusterBase {
     this.kubectlMemory = props.kubectlMemory;
     this.ipFamily = props.ipFamily ?? IpFamily.IP_V4;
     this.onEventLayer = props.onEventLayer;
-    this.clusterHandlerSecurityGroup = props.clusterHandlerSecurityGroup;
 
     const privateSubnets = this.selectPrivateSubnets().slice(0, 16);
     const publicAccessDisabled = !this.endpointAccess._config.publicAccess;
@@ -1651,16 +1526,6 @@ export class Cluster extends ClusterBase {
     if (privateSubnets.length === 0 && publicAccessRestricted) {
       // no private subnets and public access is restricted, no good.
       throw new Error('Vpc must contain private subnets when public endpoint access is restricted');
-    }
-
-    const placeClusterHandlerInVpc = props.placeClusterHandlerInVpc ?? false;
-
-    if (placeClusterHandlerInVpc && privateSubnets.length === 0) {
-      throw new Error('Cannot place cluster handler in the VPC since no private subnets could be selected');
-    }
-
-    if (props.clusterHandlerSecurityGroup && !placeClusterHandlerInVpc) {
-      throw new Error('Cannot specify clusterHandlerSecurityGroup without placeClusterHandlerInVpc set to true');
     }
 
     if (props.serviceIpv4Cidr && props.ipFamily == IpFamily.IP_V6) {
@@ -2389,7 +2254,6 @@ class ImportedCluster extends ClusterBase {
   public readonly kubectlProvider?: IKubectlProvider;
   public readonly onEventLayer?: lambda.ILayerVersion;
   public readonly kubectlMemory?: Size;
-  public readonly clusterHandlerSecurityGroup?: ec2.ISecurityGroup | undefined;
   public readonly prune: boolean;
 
   // so that `clusterSecurityGroup` on `ICluster` can be configured without optionality, avoiding users from having
@@ -2410,7 +2274,6 @@ class ImportedCluster extends ClusterBase {
     this.ipFamily = props.ipFamily;
     this.awscliLayer = props.awscliLayer;
     this.kubectlMemory = props.kubectlMemory;
-    this.clusterHandlerSecurityGroup = props.clusterHandlerSecurityGroupId ? ec2.SecurityGroup.fromSecurityGroupId(this, 'ClusterHandlerSecurityGroup', props.clusterHandlerSecurityGroupId) : undefined;
     this.kubectlProvider = props.kubectlProvider;
     this.onEventLayer = props.onEventLayer;
     this.prune = props.prune ?? true;
@@ -2653,4 +2516,12 @@ function cpuArchForInstanceType(instanceType: ec2.InstanceType) {
 
 function flatten<A>(xss: A[][]): A[] {
   return Array.prototype.concat.call([], ...xss);
+}
+
+function clusterArnComponents(clusterName: string): ArnComponents {
+  return {
+    service: 'eks',
+    resource: 'cluster',
+    resourceName: clusterName,
+  };
 }
