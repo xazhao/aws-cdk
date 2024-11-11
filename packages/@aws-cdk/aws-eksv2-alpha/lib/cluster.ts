@@ -6,7 +6,6 @@ import * as YAML from 'yaml';
 import { IAccessPolicy, IAccessEntry, AccessEntry, AccessPolicy, AccessScopeType } from './access-entry';
 import { IAddon, Addon } from './addon';
 import { AlbController, AlbControllerOptions } from './alb-controller';
-import { AwsAuth } from './aws-auth';
 import { FargateProfile, FargateProfileOptions } from './fargate-profile';
 import { HelmChart, HelmChartOptions } from './helm-chart';
 import { INSTANCE_TYPES } from './instance-types';
@@ -978,16 +977,8 @@ abstract class ClusterBase extends Resource implements ICluster {
   public abstract readonly kubectlMemory?: Size;
   public abstract readonly prune: boolean;
   public abstract readonly openIdConnectProvider: iam.IOpenIdConnectProvider;
-  public abstract readonly awsAuth: AwsAuth;
 
   private _spotInterruptHandler?: HelmChart;
-
-  /**
-   * Manages the aws-auth config map.
-   *
-   * @internal
-   */
-  protected _awsAuth?: AwsAuth;
 
   /**
    * Defines a Kubernetes resource in this cluster.
@@ -1130,31 +1121,6 @@ abstract class ClusterBase extends Resource implements ICluster {
       // (the cluster security group already has this tag)
       excludeResourceTypes: ['AWS::EC2::SecurityGroup'],
     });
-
-    // do not attempt to map the role if `kubectl` is not enabled for this
-    // cluster or if `mapRole` is set to false. By default this should happen.
-    let mapRole = options.mapRole ?? true;
-    if (mapRole && !(this instanceof Cluster)) {
-      // do the mapping...
-      Annotations.of(autoScalingGroup).addWarningV2('@aws-cdk/aws-eks:clusterUnsupportedAutoMappingAwsAutoRole', 'Auto-mapping aws-auth role for imported cluster is not supported, please map role manually');
-      mapRole = false;
-    }
-    if (mapRole) {
-      // see https://docs.aws.amazon.com/en_us/eks/latest/userguide/add-user-role.html
-      this.awsAuth.addRoleMapping(autoScalingGroup.role, {
-        username: 'system:node:{{EC2PrivateDNSName}}',
-        groups: [
-          'system:bootstrappers',
-          'system:nodes',
-        ],
-      });
-    } else {
-      // since we are not mapping the instance role to RBAC, synthesize an
-      // output so it can be pasted into `aws-auth-cm.yaml`
-      new CfnOutput(autoScalingGroup, 'InstanceRoleARN', {
-        value: autoScalingGroup.role.roleArn,
-      });
-    }
 
     const addSpotInterruptHandler = options.spotInterruptHandler ?? true;
     // if this is an ASG with spot instances, install the spot interrupt handler (only if kubectl is enabled).
@@ -1624,26 +1590,11 @@ export class Cluster extends ClusterBase {
       new CfnOutput(this, 'ClusterName', { value: this.clusterName });
     }
 
-    const supportAuthenticationApi = (this.authenticationMode === AuthenticationMode.API ||
-      this.authenticationMode === AuthenticationMode.API_AND_CONFIG_MAP) ? true : false;
-
     // do not create a masters role if one is not provided. Trusting the accountRootPrincipal() is too permissive.
     if (props.mastersRole) {
       const mastersRole = props.mastersRole;
 
-      // if we support authentication API we create an access entry for this mastersRole
-      // with cluster scope.
-      if (supportAuthenticationApi) {
-        this.grantAccess('mastersRoleAccess', props.mastersRole.roleArn, [
-          AccessPolicy.fromAccessPolicyName('AmazonEKSClusterAdminPolicy', {
-            accessScopeType: AccessScopeType.CLUSTER,
-          }),
-        ]);
-      } else {
-        // if we don't support authentication API we should fallback to configmap
-        // this would avoid breaking changes as well if authenticationMode is undefined
-        this.awsAuth.addMastersRole(mastersRole);
-      }
+      this.grantAdmin('mastersRoleAccess', props.mastersRole.roleArn);
 
       if (props.outputMastersRoleArn) {
         new CfnOutput(this, 'MastersRoleArn', { value: mastersRole.roleArn });
@@ -1691,6 +1642,14 @@ export class Cluster extends ClusterBase {
    */
   public grantAccess(id: string, principal: string, accessPolicies: IAccessPolicy[]) {
     this.addToAccessEntry(id, principal, accessPolicies);
+  }
+
+  public grantAdmin(id: string, principal: string) {
+    this.grantAccess(id, principal, [
+      AccessPolicy.fromAccessPolicyName('AmazonEKSClusterAdminPolicy', {
+        accessScopeType: AccessScopeType.CLUSTER,
+      }),
+    ]);
   }
 
   /**
@@ -1807,17 +1766,6 @@ export class Cluster extends ClusterBase {
       cluster: this,
       ...options,
     });
-  }
-
-  /**
-   * Lazily creates the AwsAuth resource, which manages AWS authentication mapping.
-   */
-  public get awsAuth() {
-    if (!this._awsAuth) {
-      this._awsAuth = new AwsAuth(this, 'AwsAuth', { cluster: this });
-    }
-
-    return this._awsAuth;
   }
 
   /**
@@ -2337,10 +2285,6 @@ class ImportedCluster extends ClusterBase {
       throw new Error('"openIdConnectProvider" is not defined for this imported cluster');
     }
     return this.props.openIdConnectProvider;
-  }
-
-  public get awsAuth(): AwsAuth {
-    throw new Error('"awsAuth" is not supported on imported clusters');
   }
 }
 
